@@ -4,6 +4,7 @@ import { fetchTeams, fetchTimeEntries } from "../../src/clickup";
 export interface TimingResponse {
   days: string[];
   projects: Project[];
+  users: ProjectUser[];
 }
 
 export interface Project {
@@ -20,6 +21,17 @@ export interface Timing {
   users: Record<string, number>;
 }
 
+export interface ProjectUser {
+  id: number;
+  name: string;
+  entries: Record<string, UserTiming>;
+}
+
+export interface UserTiming {
+  booked: number;
+  projects: Record<string, number>;
+}
+
 const handler = withSessionRoute(async (req, res) => {
   if (!req.session.user) {
     res.status(400);
@@ -27,11 +39,14 @@ const handler = withSessionRoute(async (req, res) => {
     return;
   }
 
+  // result collections
   const projects = new Map<number, Project>();
+  const users = new Map<number, ProjectUser>();
+  const days: string[] = [];
+
+  // create day list
   const endTime = Date.now();
   const startTime = endTime - 60 * 60 * 24 * 30 * 1000 - 1000;
-
-  const days: string[] = [];
   for (
     let position = startTime;
     position <= endTime;
@@ -40,6 +55,7 @@ const handler = withSessionRoute(async (req, res) => {
     days.push(timestampToDay(position));
   }
 
+  // collect time tracking
   const { teams } = await fetchTeams({ token: req.session.user.access_token });
   await Promise.all(
     teams.map(async (team) => {
@@ -53,6 +69,8 @@ const handler = withSessionRoute(async (req, res) => {
       });
 
       for (const timeEntry of timeEntries) {
+        // project time entries
+
         let project = projects.get(timeEntry.task_location.list_id);
         if (!project) {
           project = {
@@ -66,7 +84,7 @@ const handler = withSessionRoute(async (req, res) => {
         }
 
         const day = timestampToDay(parseFloat(timeEntry.end));
-        const booked = parseFloat(timeEntry.duration);
+        const booked = parseFloat(timeEntry.duration) / (60 * 60 * 1000);
         if (project.entries[day]) {
           project.entries[day].booked += booked;
           project.entries[day].bookings += 1;
@@ -79,13 +97,44 @@ const handler = withSessionRoute(async (req, res) => {
         } else {
           project.entries[day].users[timeEntry.user.username] = booked;
         }
+
+        // user time entries
+
+        let user = users.get(timeEntry.user.id);
+        if (!user) {
+          user = {
+            id: timeEntry.user.id,
+            name: timeEntry.user.username,
+            entries: {},
+          };
+
+          users.set(timeEntry.user.id, user);
+        }
+
+        if (user.entries[day]) {
+          user.entries[day].booked += booked;
+        } else {
+          user.entries[day] = { booked, projects: {} };
+        }
+
+        const fullProjectName = `${project.space} > ${project.list}`;
+        if (user.entries[day].projects[fullProjectName]) {
+          user.entries[day].projects[fullProjectName] += booked;
+        } else {
+          user.entries[day].projects[fullProjectName] = booked;
+        }
       }
     })
   );
 
   const result: TimingResponse = {
     days: days,
-    projects: Array.from(projects.values()),
+    projects: Array.from(projects.values()).sort((a, b) =>
+      a.list.localeCompare(b.list)
+    ),
+    users: Array.from(users.values()).sort((a, b) =>
+      a.name.localeCompare(b.name)
+    ),
   };
 
   res.json(result);
