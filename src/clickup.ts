@@ -23,6 +23,7 @@ export async function fetchTimeEntries({
   end_date?: number;
   assignee?: string;
   include_location_names?: boolean;
+  include_task_tags?: boolean;
 }): Promise<TimeEntry[]> {
   const response = await axios({
     url: `https://api.clickup.com/api/v2/team/${teamId}/time_entries`,

@@ -1,10 +1,12 @@
 import { withSessionRoute } from "../../src/session";
-import { fetchTeams, fetchTimeEntries } from "../../src/clickup";
+import { fetchTeams, fetchTimeEntries, TimeEntry } from "../../src/clickup";
+import { sortBy } from "lodash-es";
 
 export interface TimingResponse {
   days: string[];
   projects: Project[];
-  users: ProjectUser[];
+  users: User[];
+  tags: Tag[];
 }
 
 export interface Project {
@@ -14,22 +16,20 @@ export interface Project {
   entries: Record<string, Timing>;
 }
 
-export interface Timing {
-  day: string;
-  booked: number;
-  bookings: number;
-  users: Record<string, number>;
-}
-
-export interface ProjectUser {
+export interface User {
   id: number;
   name: string;
-  entries: Record<string, UserTiming>;
+  entries: Record<string, Timing>;
 }
 
-export interface UserTiming {
+export interface Tag {
+  name: string;
+  entries: Record<string, Timing>;
+}
+
+export interface Timing {
   booked: number;
-  projects: Record<string, number>;
+  references: Record<string, number>;
 }
 
 const handler = withSessionRoute(async (req, res) => {
@@ -41,7 +41,8 @@ const handler = withSessionRoute(async (req, res) => {
 
   // result collections
   const projects = new Map<number, Project>();
-  const users = new Map<number, ProjectUser>();
+  const users = new Map<number, User>();
+  const tags = new Map<string, Tag>();
   const days: string[] = [];
 
   // create day list
@@ -66,81 +67,112 @@ const handler = withSessionRoute(async (req, res) => {
         end_date: endTime,
         assignee: team.members.map((member) => member.user.id).join(","),
         include_location_names: true,
+        include_task_tags: true,
       });
 
-      for (const timeEntry of timeEntries) {
-        // project time entries
-
-        let project = projects.get(timeEntry.task_location.list_id);
-        if (!project) {
-          project = {
-            id: timeEntry.task_location.list_id,
-            space: timeEntry.task_location.space_name,
-            list: timeEntry.task_location.list_name,
-            entries: {},
-          };
-
-          projects.set(timeEntry.task_location.list_id, project);
-        }
-
-        const day = timestampToDay(parseFloat(timeEntry.end));
-        const booked = parseFloat(timeEntry.duration) / (60 * 60 * 1000);
-        if (project.entries[day]) {
-          project.entries[day].booked += booked;
-          project.entries[day].bookings += 1;
-        } else {
-          project.entries[day] = { day, booked, bookings: 1, users: {} };
-        }
-
-        if (project.entries[day].users[timeEntry.user.username]) {
-          project.entries[day].users[timeEntry.user.username] += booked;
-        } else {
-          project.entries[day].users[timeEntry.user.username] = booked;
-        }
-
-        // user time entries
-
-        let user = users.get(timeEntry.user.id);
-        if (!user) {
-          user = {
-            id: timeEntry.user.id,
-            name: timeEntry.user.username,
-            entries: {},
-          };
-
-          users.set(timeEntry.user.id, user);
-        }
-
-        if (user.entries[day]) {
-          user.entries[day].booked += booked;
-        } else {
-          user.entries[day] = { booked, projects: {} };
-        }
-
-        const fullProjectName = `${project.space} > ${project.list}`;
-        if (user.entries[day].projects[fullProjectName]) {
-          user.entries[day].projects[fullProjectName] += booked;
-        } else {
-          user.entries[day].projects[fullProjectName] = booked;
-        }
-      }
+      handleProjects(projects, timeEntries);
+      handleUsers(users, timeEntries);
+      handleTags(tags, timeEntries);
     })
   );
 
   const result: TimingResponse = {
     days: days,
-    projects: Array.from(projects.values()).sort((a, b) =>
-      a.list.localeCompare(b.list)
-    ),
-    users: Array.from(users.values()).sort((a, b) =>
-      a.name.localeCompare(b.name)
-    ),
+    projects: sortBy(Array.from(projects.values()), "list"),
+    users: sortBy(Array.from(users.values()), "name"),
+    tags: sortBy(Array.from(tags.values()), "name"),
   };
 
   res.json(result);
 });
 
 export default handler;
+
+function handleProjects(
+  projects: Map<number, Project>,
+  timeEntries: TimeEntry[]
+) {
+  for (const timeEntry of timeEntries) {
+    let project = projects.get(timeEntry.task_location.list_id);
+    if (!project) {
+      project = {
+        id: timeEntry.task_location.list_id,
+        space: timeEntry.task_location.space_name,
+        list: timeEntry.task_location.list_name,
+        entries: {},
+      };
+
+      projects.set(timeEntry.task_location.list_id, project);
+    }
+
+    handleTimings(project, timeEntry, timeEntry.user.username);
+  }
+}
+
+function handleUsers(users: Map<number, User>, timeEntries: TimeEntry[]) {
+  for (const timeEntry of timeEntries) {
+    let user = users.get(timeEntry.user.id);
+    if (!user) {
+      user = {
+        id: timeEntry.user.id,
+        name: timeEntry.user.username,
+        entries: {},
+      };
+
+      users.set(timeEntry.user.id, user);
+    }
+
+    const referenceName = [
+      timeEntry.task_location.space_name,
+      timeEntry.task_location.list_name,
+    ];
+    handleTimings(user, timeEntry, referenceName.join(" > "));
+  }
+}
+
+function handleTags(tags: Map<string, Tag>, timeEntries: TimeEntry[]) {
+  for (const timeEntry of timeEntries) {
+    for (const tagEntry of [...timeEntry.tags, ...timeEntry.task_tags]) {
+      let tag = tags.get(tagEntry.name);
+      if (!tag) {
+        tag = {
+          name: tagEntry.name,
+          entries: {},
+        };
+
+        tags.set(tagEntry.name, tag);
+      }
+
+      const referenceName = [
+        timeEntry.task_location.space_name,
+        timeEntry.task_location.list_name,
+        timeEntry.user.username,
+      ];
+      handleTimings(tag, timeEntry, referenceName.join(" > "));
+    }
+  }
+}
+
+function handleTimings(
+  subject: { entries: Record<string, Timing> },
+  timeEntry: TimeEntry,
+  referenceName: string
+) {
+  const day = timestampToDay(parseFloat(timeEntry.end));
+  const booked = parseFloat(timeEntry.duration) / (60 * 60 * 1000);
+
+  if (subject.entries[day]) {
+    subject.entries[day].booked += booked;
+  } else {
+    subject.entries[day] = { booked, references: {} };
+  }
+
+  if (subject.entries[day].references[referenceName]) {
+    subject.entries[day].references[referenceName] += booked;
+  } else {
+    subject.entries[day].references[referenceName] = booked;
+  }
+}
 
 function timestampToDay(timestamp: number): string {
   return new Date(timestamp).toISOString().slice(0, 10);

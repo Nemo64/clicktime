@@ -1,8 +1,9 @@
 import Head from "next/head";
 import useSWR from "swr";
-import { TimingResponse } from "./api/timing";
+import { Timing, TimingResponse } from "./api/timing";
 import classNames from "classnames";
 import { Button } from "../components/button";
+import { groupBy, sortBy } from "lodash-es";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 const dateFormat = new Intl.DateTimeFormat("default", {
@@ -31,11 +32,6 @@ export default function Table() {
       </div>
     );
   }
-
-  const spaces: string[] = data.projects
-    .map((project) => project.space)
-    .filter((value, index, self) => self.indexOf(value) === index)
-    .sort();
 
   return (
     <div>
@@ -80,86 +76,110 @@ export default function Table() {
             <th colSpan={data.days.length} />
           </tr>
           {data.users.map((user) => (
-            <tr key={user.id} className="hover:bg-slate-100">
-              <th className="sticky left-0 z-10 bg-white border-r whitespace-nowrap text-right font-normal">
-                {user.name}
-              </th>
-              {data.days.map((day) => (
-                <td
-                  key={day}
-                  className={classNames({
-                    "text-right relative group hover:bg-slate-200": true,
-                    "bg-green-400/10": isWeekend(day),
-                    "text-red-800": user.entries[day]?.booked < 6,
-                    "text-blue-800": user.entries[day]?.booked > 8,
-                  })}
-                >
-                  {formatNumber(user.entries[day]?.booked)}
-                  {user.entries[day] && (
-                    <div className="select-none pointer-events-none absolute z-10 top-100 right-0 hidden group-hover:block bg-white text-black px-4 py-2 shadow border rounded">
-                      {Object.entries(user.entries[day]?.projects).map(
-                        ([project, booked]) => (
-                          <div
-                            key={project}
-                            className="text-xs text-right whitespace-nowrap"
-                          >
-                            {project}: {formatNumber(booked)}
-                          </div>
-                        )
-                      )}
-                    </div>
-                  )}
-                </td>
-              ))}
-            </tr>
+            <TimingRow
+              key={user.name}
+              name={user.name}
+              days={data.days}
+              entries={user.entries}
+              cellClassName={(timing) =>
+                classNames({
+                  "text-red-800": timing?.booked < 6,
+                  "text-blue-800": timing?.booked > 8,
+                })
+              }
+            />
           ))}
         </tbody>
 
-        {spaces.map((space) => (
-          <tbody key={space} className="hover:bg-slate-50">
-            <tr>
-              <th className="sticky left-0 z-10 bg-white border-r whitespace-nowrap text-right pt-6">
-                {space}
-              </th>
-              <th colSpan={data.days.length} />
-            </tr>
-            {data.projects
-              .filter((p) => p.space === space)
-              .map((project) => (
-                <tr key={project.id} className="hover:bg-slate-100">
-                  <th className="sticky left-0 z-10 bg-white border-r whitespace-nowrap text-right font-normal">
-                    {project.list}
-                  </th>
-                  {data.days.map((day) => (
-                    <td
-                      key={day}
-                      className={classNames({
-                        "text-right relative group hover:bg-slate-200": true,
-                        "bg-green-400/10": isWeekend(day),
-                      })}
-                    >
-                      {formatNumber(project.entries[day]?.booked)}
-                      {project.entries[day] && (
-                        <div className="select-none pointer-events-none absolute z-10 top-100 right-0 hidden group-hover:block bg-white text-black px-4 py-2 shadow border rounded">
-                          {Object.entries(project.entries[day]?.users).map(
-                            ([user, booked]) => (
-                              <div
-                                key={user}
-                                className="text-xs text-right whitespace-nowrap"
-                              >
-                                {user}: {formatNumber(booked)}
-                              </div>
-                            )
-                          )}
-                        </div>
-                      )}
-                    </td>
-                  ))}
-                </tr>
+        <tbody className="hover:bg-slate-50">
+          <tr>
+            <th className="sticky left-0 z-10 bg-white border-r whitespace-nowrap text-right pt-6">
+              Tags
+            </th>
+            <th colSpan={data.days.length} />
+          </tr>
+          {data.tags.map((tag) => (
+            <TimingRow
+              key={tag.name}
+              name={`#${tag.name}`}
+              days={data.days}
+              entries={tag.entries}
+            />
+          ))}
+        </tbody>
+
+        {Object.entries(groupBy(data.projects, "space")).map(
+          ([space, projects]) => (
+            <tbody key={space} className="hover:bg-slate-50">
+              <tr>
+                <th className="sticky left-0 z-10 bg-white border-r whitespace-nowrap text-right pt-6">
+                  {space}
+                </th>
+                <th colSpan={data.days.length} />
+              </tr>
+              {projects.map((project) => (
+                <TimingRow
+                  key={project.list}
+                  name={project.list}
+                  days={data.days}
+                  entries={project.entries}
+                />
               ))}
-          </tbody>
-        ))}
+            </tbody>
+          )
+        )}
       </table>
+    </div>
+  );
+}
+
+function TimingRow({
+  name,
+  days,
+  entries,
+  cellClassName,
+}: {
+  name: string;
+  days: string[];
+  entries: Record<string, Timing>;
+  cellClassName?: (timing: Timing) => string;
+}) {
+  return (
+    <tr className="hover:bg-slate-100">
+      <th className="sticky left-0 z-10 bg-white border-r whitespace-nowrap text-right font-normal">
+        {name}
+      </th>
+      {days.map((day) => (
+        <td
+          key={day}
+          className={classNames(
+            "text-right relative group hover:bg-slate-200",
+            { "bg-green-400/10": isWeekend(day) },
+            cellClassName?.(entries[day])
+          )}
+        >
+          {formatNumber(entries[day]?.booked)}
+          {entries[day] && (
+            <ReferenceModal references={entries[day].references} />
+          )}
+        </td>
+      ))}
+    </tr>
+  );
+}
+
+function ReferenceModal({
+  references,
+}: {
+  references: Record<string, number>;
+}) {
+  return (
+    <div className="select-none pointer-events-none absolute z-50 top-100 right-0 hidden group-hover:block bg-white text-black px-4 py-2 shadow border rounded">
+      {sortBy(Object.entries(references), "0").map(([user, booked]) => (
+        <div key={user} className="text-xs text-right whitespace-nowrap">
+          {user}: {formatNumber(booked)}
+        </div>
+      ))}
     </div>
   );
 }
