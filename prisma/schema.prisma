@@ -1,0 +1,32 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+  previewFeatures = ["cockroachdb"]
+}
+
+datasource db {
+  provider = "cockroachdb"
+  url      = env("DATABASE_URL")
+}
+
+enum TargetType {
+  user
+  tag
+  list
+}
+
+model Timeplan {
+  id          Int @id @default(autoincrement())
+  name        String
+  team_id     String
+  target_type TargetType
+  target_id   String
+  cycle_start DateTime @db.Date
+  cycle_days  Int @db.Int2
+  cycle_end   DateTime @db.Date
+  hours       Float
+
+  @@index([team_id, cycle_end])
+}

@@ -56,7 +56,7 @@ export const getServerSideProps = withSessionSsr(async ({ query, req }) => {
 
   return {
     redirect: {
-      destination: "/table/",
+      destination: "/table",
       permanent: false,
     },
   };

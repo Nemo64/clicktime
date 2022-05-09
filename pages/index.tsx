@@ -5,7 +5,7 @@ export default function Home() {
   const login = () => {
     location.href = `https://app.clickup.com/api?${new URLSearchParams({
       client_id: process.env.NEXT_PUBLIC_CLICKUP_CLIENT_ID as string,
-      redirect_uri: `${location.origin}/auth/clickup/`,
+      redirect_uri: `${location.origin}/auth/clickup`,
     })}`;
   };
 

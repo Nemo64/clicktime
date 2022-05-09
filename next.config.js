@@ -4,7 +4,6 @@ const classNames = require("classnames");
 /** @type {import('next').NextConfig} */
 module.exports = (phase) => ({
   reactStrictMode: true,
-  trailingSlash: true,
   headers: () => [
     {
       source: "/(.*)",

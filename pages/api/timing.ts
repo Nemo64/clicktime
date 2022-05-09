@@ -1,18 +1,21 @@
 import { withSessionRoute } from "../../src/session";
 import { fetchTeams, fetchTimeEntries, TimeEntry } from "../../src/clickup";
 import { sortBy } from "lodash-es";
+import { prisma } from "../../src/db";
+import { Timeplan } from "@prisma/client";
 
 export interface TimingResponse {
   days: string[];
-  projects: Project[];
+  lists: List[];
   users: User[];
   tags: Tag[];
+  timePlans: JsonTimePlan[];
 }
 
-export interface Project {
+export interface List {
   id: number;
   space: string;
-  list: string;
+  name: string;
   entries: Record<string, Timing>;
 }
 
@@ -28,11 +31,28 @@ export interface Tag {
 }
 
 export interface Timing {
-  booked: number;
+  hours: number;
   references: Record<string, number>;
 }
 
-const handler = withSessionRoute(async (req, res) => {
+export interface JsonTimePlan {
+  id: number;
+  name: string;
+  team_id: string;
+  target_type: Timeplan["target_type"];
+  target_id: string;
+  cycle_start: string;
+  cycle_days: number;
+  cycle_end: string;
+  hours: number;
+}
+
+/**
+ * Since timeplans can be in the past, we need to fetch further back than we show
+ */
+const OVERFETCH_DAYS = 30;
+
+export default withSessionRoute(async (req, res) => {
   if (!req.session.user) {
     res.status(400);
     res.json({ error: "Unauthorized" });
@@ -40,7 +60,7 @@ const handler = withSessionRoute(async (req, res) => {
   }
 
   // result collections
-  const projects = new Map<number, Project>();
+  const projects = new Map<number, List>();
   const users = new Map<number, User>();
   const tags = new Map<string, Tag>();
   const days: string[] = [];
@@ -48,6 +68,7 @@ const handler = withSessionRoute(async (req, res) => {
   // create day list
   const endTime = Date.now();
   const startTime = endTime - 60 * 60 * 24 * 30 * 1000 - 1000;
+  const overFetchStartTime = startTime - OVERFETCH_DAYS * 24 * 60 * 60 * 1000;
   for (
     let position = startTime;
     position <= endTime;
@@ -58,54 +79,58 @@ const handler = withSessionRoute(async (req, res) => {
 
   // collect time tracking
   const { teams } = await fetchTeams({ token: req.session.user.access_token });
-  await Promise.all(
-    teams.map(async (team) => {
-      const timeEntries = await fetchTimeEntries({
-        teamId: team.id,
-        token: req.session.user.access_token,
-        start_date: startTime,
-        end_date: endTime,
-        assignee: team.members.map((member) => member.user.id).join(","),
-        include_location_names: true,
-        include_task_tags: true,
-      });
+  const entryRequests = teams.map(async (team) => {
+    const timeEntries = fetchTimeEntries({
+      teamId: team.id,
+      token: req.session.user.access_token,
+      start_date: overFetchStartTime,
+      end_date: endTime,
+      assignee: team.members.map((member) => member.user.id).join(","),
+      include_location_names: true,
+      include_task_tags: true,
+    });
 
-      handleProjects(projects, timeEntries);
-      handleUsers(users, timeEntries);
-      handleTags(tags, timeEntries);
-    })
-  );
+    handleProjects(projects, await timeEntries);
+    handleUsers(users, await timeEntries);
+    handleTags(tags, await timeEntries);
+  });
+
+  const timePlans = prisma.timeplan.findMany({
+    where: {
+      cycle_end: { gte: new Date(startTime) },
+      cycle_start: { lte: new Date(endTime) },
+      team_id: { in: teams.map((team) => team.id) },
+    },
+  });
+
+  await Promise.all(entryRequests);
 
   const result: TimingResponse = {
     days: days,
-    projects: sortBy(Array.from(projects.values()), "list"),
+    lists: sortBy(Array.from(projects.values()), "list"),
     users: sortBy(Array.from(users.values()), "name"),
     tags: sortBy(Array.from(tags.values()), "name"),
+    timePlans: (await timePlans) as unknown as JsonTimePlan[],
   };
 
   res.json(result);
 });
 
-export default handler;
-
-function handleProjects(
-  projects: Map<number, Project>,
-  timeEntries: TimeEntry[]
-) {
+function handleProjects(lists: Map<number, List>, timeEntries: TimeEntry[]) {
   for (const timeEntry of timeEntries) {
-    let project = projects.get(timeEntry.task_location.list_id);
-    if (!project) {
-      project = {
+    let list = lists.get(timeEntry.task_location.list_id);
+    if (!list) {
+      list = {
         id: timeEntry.task_location.list_id,
         space: timeEntry.task_location.space_name,
-        list: timeEntry.task_location.list_name,
+        name: timeEntry.task_location.list_name,
         entries: {},
       };
 
-      projects.set(timeEntry.task_location.list_id, project);
+      lists.set(timeEntry.task_location.list_id, list);
     }
 
-    handleTimings(project, timeEntry, timeEntry.user.username);
+    handleTimings(list, timeEntry, timeEntry.user.username);
   }
 }
 
@@ -162,9 +187,9 @@ function handleTimings(
   const booked = parseFloat(timeEntry.duration) / (60 * 60 * 1000);
 
   if (subject.entries[day]) {
-    subject.entries[day].booked += booked;
+    subject.entries[day].hours += booked;
   } else {
-    subject.entries[day] = { booked, references: {} };
+    subject.entries[day] = { hours: booked, references: {} };
   }
 
   if (subject.entries[day].references[referenceName]) {
