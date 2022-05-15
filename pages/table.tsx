@@ -280,8 +280,8 @@ function TimePlanBlock({
         title={
           `${formatNumber(usedHours)} hours used of\n` +
           `${formatNumber(timePlan.hours)} planned hours\n` +
-          `from ${dateFormat.format(new Date(startDay))} ` +
-          `to ${dateFormat.format(new Date(endDay))}`
+          `${dateFormat.format(new Date(startDay))} - ` +
+          `${dateFormat.format(new Date(endDay))}`
         }
       >
         {formatNumber(usedHours)} / {formatNumber(timePlan.hours)}

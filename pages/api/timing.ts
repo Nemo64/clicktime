@@ -59,6 +59,10 @@ export default withSessionRoute(async (req, res) => {
     return;
   }
 
+  // preconnect to database for extra performance
+  console.log("Ensure db connection");
+  prisma.$connect().catch(console.error);
+
   // result collections
   const projects = new Map<number, List>();
   const users = new Map<number, User>();
@@ -80,28 +84,56 @@ export default withSessionRoute(async (req, res) => {
   // collect time tracking
   const { teams } = await fetchTeams({ token: req.session.user.access_token });
   const entryRequests = teams.map(async (team) => {
-    const timeEntries = fetchTimeEntries({
-      teamId: team.id,
-      token: req.session.user.access_token,
-      start_date: overFetchStartTime,
-      end_date: endTime,
-      assignee: team.members.map((member) => member.user.id).join(","),
-      include_location_names: true,
-      include_task_tags: true,
-    });
+    await Promise.all(
+      // split the time range into 2 requests to avoid hitting the rate limit
+      [
+        [overFetchStartTime, startTime - 1],
+        [startTime, endTime],
+      ].map(async ([start_date, end_date]) => {
+        const startT = Date.now();
+        console.log(
+          "start fetching range",
+          new Date(start_date),
+          new Date(end_date)
+        );
+        const timeEntries = await fetchTimeEntries({
+          teamId: team.id,
+          token: req.session.user.access_token,
+          start_date: start_date,
+          end_date: end_date,
+          assignee: team.members.map((member) => member.user.id).join(","),
+          include_location_names: true,
+          include_task_tags: true,
+        });
+        console.log(
+          "done fetching range",
+          new Date(start_date),
+          new Date(end_date),
+          timeEntries.length,
+          `${Date.now() - startT}ms`
+        );
 
-    handleProjects(projects, await timeEntries);
-    handleUsers(users, await timeEntries);
-    handleTags(tags, await timeEntries);
+        handleProjects(projects, timeEntries);
+        handleUsers(users, timeEntries);
+        handleTags(tags, timeEntries);
+      })
+    );
   });
 
-  const timePlans = prisma.timeplan.findMany({
+  const timeplanT = Date.now();
+  console.log("start fetching timeplans");
+  const timePlans = await prisma.timeplan.findMany({
     where: {
       cycle_end: { gte: new Date(startTime) },
       cycle_start: { lte: new Date(endTime) },
       team_id: { in: teams.map((team) => team.id) },
     },
   });
+  console.log(
+    "done fetching timeplans",
+    timePlans.length,
+    `${Date.now() - timeplanT}ms`
+  );
 
   await Promise.all(entryRequests);
 
@@ -110,7 +142,7 @@ export default withSessionRoute(async (req, res) => {
     lists: sortBy(Array.from(projects.values()), "list"),
     users: sortBy(Array.from(users.values()), "name"),
     tags: sortBy(Array.from(tags.values()), "name"),
-    timePlans: (await timePlans) as unknown as JsonTimePlan[],
+    timePlans: timePlans as unknown as JsonTimePlan[],
   };
 
   res.json(result);
