@@ -4,7 +4,9 @@ import { JsonTimePlan, Timing, TimingResponse } from "./api/timing";
 import classNames from "classnames";
 import { Button } from "../components/button";
 import { clamp, groupBy, sortBy } from "lodash-es";
-import { ReactNode } from "react";
+import { ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { useForm } from "react-hook-form";
+import { Timeplan } from "@prisma/client";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 const dateFormat = new Intl.DateTimeFormat("default", {
@@ -17,7 +19,57 @@ const DAY_WIDTH = 2.5;
 const LABEL_WIDTH = 16;
 
 export default function Table() {
-  const { data } = useSWR<TimingResponse>("/api/timing", fetcher);
+  const [editTimePlan, setEditTimePlan] = useState<JsonTimePlan>();
+  const { data, mutate } = useSWR<TimingResponse>("/api/timing", fetcher, {
+    revalidateOnFocus: editTimePlan === undefined,
+  });
+
+  const save = useCallback(
+    async (timePlan: JsonTimePlan) => {
+      const response = await fetch("/api/save", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(timePlan),
+      });
+
+      const data = await response.json();
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
+      await mutate();
+      setEditTimePlan(undefined);
+      return data.success;
+    },
+    [mutate]
+  );
+
+  // merge the edited time plan into the list
+  const timePlans = useMemo(() => {
+    if (!data) {
+      return [];
+    }
+
+    if (!editTimePlan) {
+      return data.timePlans;
+    }
+
+    const timePlans = [...data.timePlans];
+    if (editTimePlan) {
+      const existingIndex = timePlans.findIndex(
+        (t) => t.id === editTimePlan.id
+      );
+      if (existingIndex >= 0) {
+        timePlans[existingIndex] = editTimePlan;
+      } else {
+        timePlans.push(editTimePlan);
+      }
+    }
+
+    return timePlans;
+  }, [data, editTimePlan]);
 
   if (!data) {
     return (
@@ -83,9 +135,13 @@ export default function Table() {
               id={String(user.id)}
               type={"user"}
               name={user.name}
+              team_id={user.team_id}
               days={data.days}
               entries={user.entries}
-              timePlans={data.timePlans}
+              timePlans={timePlans}
+              editTimePlan={editTimePlan}
+              setEditTimePlan={setEditTimePlan}
+              save={save}
               cellClassName={(timing) =>
                 classNames({
                   "text-red-800": timing?.hours < 6,
@@ -104,9 +160,13 @@ export default function Table() {
               id={tag.name}
               type={"tag"}
               name={`#${tag.name}`}
+              team_id={tag.team_id}
               days={data.days}
               entries={tag.entries}
-              timePlans={data.timePlans}
+              timePlans={timePlans}
+              editTimePlan={editTimePlan}
+              setEditTimePlan={setEditTimePlan}
+              save={save}
             />
           ))}
         </tbody>
@@ -120,9 +180,13 @@ export default function Table() {
                 id={String(list.id)}
                 type={"list"}
                 name={list.name}
+                team_id={list.team_id}
                 days={data.days}
                 entries={list.entries}
-                timePlans={data.timePlans}
+                timePlans={timePlans}
+                editTimePlan={editTimePlan}
+                setEditTimePlan={setEditTimePlan}
+                save={save}
               />
             ))}
           </tbody>
@@ -160,57 +224,78 @@ function TimingRow({
   id,
   type,
   name,
+  team_id,
   days,
   entries,
   timePlans,
+  editTimePlan,
+  setEditTimePlan,
+  save,
   cellClassName,
 }: {
   id: string;
-  type: string;
+  type: Timeplan["target_type"];
   name: string;
+  team_id: string;
   days: string[];
   entries: Record<string, Timing>;
   timePlans: JsonTimePlan[];
+  editTimePlan?: JsonTimePlan;
+  setEditTimePlan: (timePlan: JsonTimePlan | undefined) => void;
+  save: (timePlan: JsonTimePlan) => Promise<void>;
   cellClassName?: (timing: Timing) => string;
 }) {
-  const timePlanMap = {} as Record<string, ExtendedTimePlan>;
-  for (const timePlan of timePlans) {
-    if (timePlan.target_type !== type || timePlan.target_id !== id) {
-      continue;
-    }
-
-    const endCycleTimestamp = new Date(timePlan.cycle_end).getTime();
-    for (
-      let cycleStart = new Date(timePlan.cycle_start);
-      cycleStart.getTime() <= endCycleTimestamp;
-      cycleStart.setUTCDate(cycleStart.getUTCDate() + timePlan.cycle_days)
-    ) {
-      const endDate = new Date(
-        new Date(cycleStart).setUTCDate(
-          cycleStart.getUTCDate() + timePlan.cycle_days
-        )
-      );
-
-      const startDay = cycleStart.toISOString().slice(0, 10);
-      const endDay = endDate.toISOString().slice(0, 10);
-      if (endDay < days[0] || startDay > days[days.length - 1]) {
+  const timePlanMap = useMemo<Record<string, ExtendedTimePlan>>(() => {
+    const timePlanMap = {} as Record<string, ExtendedTimePlan>;
+    for (const timePlan of timePlans) {
+      if (timePlan.target_type !== type || timePlan.target_id !== id) {
         continue;
       }
 
-      const key = days.includes(startDay) ? startDay : days[0];
-      timePlanMap[key] = { timePlan, usedHours: 0, startDay, endDay };
-
-      const endTimestamp = endDate.getTime();
+      const endCycleTimestamp = Math.min(
+        new Date(timePlan.cycle_end).getTime(),
+        new Date(days[days.length - 1]).getTime()
+      );
       for (
-        let i = new Date(cycleStart);
-        i.getTime() <= endTimestamp;
-        i.setUTCDate(i.getUTCDate() + 1)
+        let cycleStart = new Date(timePlan.cycle_start);
+        cycleStart.getTime() <= endCycleTimestamp;
+        cycleStart.setUTCDate(cycleStart.getUTCDate() + timePlan.cycle_days)
       ) {
-        timePlanMap[key].usedHours +=
-          entries[i.toISOString().slice(0, 10)]?.hours ?? 0;
+        const endDate = new Date(cycleStart);
+        endDate.setUTCDate(cycleStart.getUTCDate() + timePlan.cycle_days);
+        if (endDate.getTime() > endCycleTimestamp) {
+          endDate.setTime(endCycleTimestamp);
+        }
+
+        const startDay = cycleStart.toISOString().slice(0, 10);
+        const endDay = endDate.toISOString().slice(0, 10);
+        if (endDay < days[0] || startDay > days[days.length - 1]) {
+          continue;
+        }
+
+        const key = days.includes(startDay) ? startDay : days[0];
+        timePlanMap[key] = { timePlan, usedHours: 0, startDay, endDay };
+
+        const endTimestamp = endDate.getTime();
+        for (
+          let i = new Date(cycleStart);
+          i.getTime() <= endTimestamp;
+          i.setUTCDate(i.getUTCDate() + 1)
+        ) {
+          timePlanMap[key].usedHours +=
+            entries[i.toISOString().slice(0, 10)]?.hours ?? 0;
+        }
       }
     }
-  }
+
+    return timePlanMap;
+  }, [days, entries, id, timePlans, type]);
+
+  const edit =
+    editTimePlan &&
+    Object.values(timePlanMap).some(
+      (timePlan) => timePlan.timePlan === editTimePlan
+    );
 
   return (
     <tr className="hover:bg-slate-100 align-top">
@@ -218,6 +303,13 @@ function TimingRow({
         <div className="truncate" title={`id: ${id}`}>
           {name}
         </div>
+        {edit && (
+          <EditModal
+            editTimePlan={editTimePlan}
+            setEditTimePlan={setEditTimePlan}
+            save={save}
+          />
+        )}
       </th>
       {days.map((day) => (
         <td
@@ -228,15 +320,32 @@ function TimingRow({
             cellClassName?.(entries[day])
           )}
         >
-          <div className="group hover:bg-slate-200">
+          <Button
+            className="group block w-full hover:bg-slate-200"
+            onClick={() =>
+              setEditTimePlan({
+                id: 0,
+                team_id: team_id,
+                name: "",
+                cycle_start: new Date(day).toISOString().substring(0, 10),
+                cycle_end: dateAdd(day, 6).toISOString().substring(0, 10),
+                cycle_days: 7,
+                target_id: id,
+                target_type: type,
+                hours: 8,
+              })
+            }
+          >
             {formatNumber(entries[day]?.hours) || " "}
             {entries[day] && (
               <ReferenceModal references={entries[day].references} />
             )}
-          </div>
+          </Button>
           {timePlanMap[day] && (
             <TimePlanBlock
               {...timePlanMap[day]}
+              editing={timePlanMap[day].timePlan === editTimePlan}
+              onClick={() => setEditTimePlan(timePlanMap[day].timePlan)}
               dayWidth={Math.min(
                 daysBetween(day, timePlanMap[day].startDay) +
                   timePlanMap[day].timePlan.cycle_days,
@@ -251,16 +360,153 @@ function TimingRow({
   );
 }
 
+const GLOBAL_RELEVANT_PROPS = [
+  "cycle_start",
+  "cycle_end",
+  "cycle_days",
+  "hours",
+];
+
+function EditModal({
+  editTimePlan,
+  setEditTimePlan,
+  save,
+}: {
+  editTimePlan: JsonTimePlan;
+  setEditTimePlan: (timePlan: JsonTimePlan | undefined) => void;
+  save: (timePlan: JsonTimePlan) => Promise<void>;
+}) {
+  const { register, handleSubmit, watch, setValue, reset } = useForm({
+    defaultValues: editTimePlan,
+  });
+
+  useEffect(() => {
+    reset(editTimePlan);
+  }, [editTimePlan, reset]);
+
+  useEffect(() => {
+    const sub = watch((value, { name }) => {
+      if (!name || GLOBAL_RELEVANT_PROPS.includes(name)) {
+        setEditTimePlan(value as JsonTimePlan);
+      }
+      if (value.cycle_end && value.cycle_start && value.cycle_days) {
+        const endDate = dateAdd(value.cycle_start, value.cycle_days - 1)
+          .toISOString()
+          .slice(0, 10);
+        if (value.cycle_end < endDate) {
+          setValue("cycle_end", endDate);
+        }
+      }
+    });
+    return () => sub.unsubscribe();
+  }, [setEditTimePlan, setValue, watch]);
+
+  return (
+    <form className="absolute left-full top-full bg-white mx-2 px-4 py-2 rounded border shadow-lg">
+      <div className="flex flex-col">
+        <label className="flex flex-row items-center gap-2 justify-between">
+          Start
+          <input
+            type="date"
+            className="w-32"
+            max={dateAdd(watch("cycle_end"), watch("cycle_days") * -1 + 1)
+              .toISOString()
+              .slice(0, 10)}
+            {...register("cycle_start", {
+              required: true,
+            })}
+          />
+        </label>
+        <label className="flex flex-row items-center gap-2 justify-between">
+          End
+          <input
+            type="date"
+            className="w-32"
+            min={dateAdd(watch("cycle_start"), watch("cycle_days") - 1)
+              .toISOString()
+              .slice(0, 10)}
+            {...register("cycle_end", {
+              required: true,
+            })}
+          />
+        </label>
+        <label className="flex flex-row items-center gap-2 justify-between">
+          Days
+          <input
+            type="number"
+            className="w-32"
+            {...register("cycle_days", {
+              min: 1,
+              max: 31,
+              valueAsNumber: true,
+              required: true,
+            })}
+          />
+        </label>
+        <label className="flex flex-row items-center gap-2 justify-between">
+          Hours
+          <input
+            type="number"
+            className="w-32"
+            {...register("hours", {
+              min: 1,
+              max: 10000,
+              valueAsNumber: true,
+              required: true,
+            })}
+          />
+        </label>
+        <label className="flex flex-row items-center gap-2 justify-between">
+          Name
+          <input type="text" className="w-32" {...register("name")} />
+        </label>
+      </div>
+      <div className="flex flex-row" role="toolbar">
+        <Button
+          onClick={handleSubmit(save)}
+          className="flex-grow px-4 py-2 text-white bg-blue-500 hover:bg-blue-400"
+        >
+          Save
+        </Button>
+        {editTimePlan.id > 0 && (
+          <Button
+            onClick={() => save({ ...editTimePlan, hours: 0 })}
+            className="flex-grow px-4 py-2 text-white bg-red-500 hover:bg-red-400"
+          >
+            Delete
+          </Button>
+        )}
+        <Button
+          onClick={() => setEditTimePlan(undefined)}
+          className="flex-grow px-4 py-2 text-white bg-slate-500 hover:bg-slate-400"
+        >
+          Close
+        </Button>
+      </div>
+    </form>
+  );
+}
+
 function TimePlanBlock({
   timePlan,
   usedHours,
   dayWidth,
   startDay,
   endDay,
-}: ExtendedTimePlan & { dayWidth: number }) {
+  editing,
+  onClick,
+}: ExtendedTimePlan & {
+  dayWidth: number;
+  editing?: boolean;
+  onClick?: () => void;
+}) {
   return (
     <div
-      className="relative z-10 bg-blue-400/25 text-black text-xs text-center rounded-b-xl px-2 py-1 overflow-hidden"
+      className={classNames(
+        "relative z-10 bg-blue-400/25 text-black text-xs text-center rounded-b-xl px-2 py-1 overflow-hidden",
+        { "animate-bounce": editing }
+      )}
+      onClick={onClick}
       style={{ width: `${DAY_WIDTH * dayWidth}rem` }}
     >
       <div
@@ -310,6 +556,12 @@ function daysBetween(start: string, end: string) {
   return (
     (new Date(end).getTime() - new Date(start).getTime()) / 1000 / 60 / 60 / 24
   );
+}
+
+function dateAdd(str: string, days: number) {
+  const date = new Date(str);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date;
 }
 
 function isWeekend(date: string) {

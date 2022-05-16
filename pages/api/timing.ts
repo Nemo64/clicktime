@@ -1,5 +1,10 @@
 import { withSessionRoute } from "../../src/session";
-import { fetchTeams, fetchTimeEntries, TimeEntry } from "../../src/clickup";
+import {
+  fetchTeams,
+  fetchTimeEntries,
+  Team,
+  TimeEntry,
+} from "../../src/clickup";
 import { sortBy } from "lodash-es";
 import { prisma } from "../../src/db";
 import { Timeplan } from "@prisma/client";
@@ -16,17 +21,20 @@ export interface List {
   id: number;
   space: string;
   name: string;
+  team_id: string;
   entries: Record<string, Timing>;
 }
 
 export interface User {
   id: number;
   name: string;
+  team_id: string;
   entries: Record<string, Timing>;
 }
 
 export interface Tag {
   name: string;
+  team_id: string;
   entries: Record<string, Timing>;
 }
 
@@ -113,9 +121,9 @@ export default withSessionRoute(async (req, res) => {
           `${Date.now() - startT}ms`
         );
 
-        handleProjects(projects, timeEntries);
-        handleUsers(users, timeEntries);
-        handleTags(tags, timeEntries);
+        handleProjects(team, projects, timeEntries);
+        handleUsers(team, users, timeEntries);
+        handleTags(team, tags, timeEntries);
       })
     );
   });
@@ -142,13 +150,21 @@ export default withSessionRoute(async (req, res) => {
     lists: sortBy(Array.from(projects.values()), "list"),
     users: sortBy(Array.from(users.values()), "name"),
     tags: sortBy(Array.from(tags.values()), "name"),
-    timePlans: timePlans as unknown as JsonTimePlan[],
+    timePlans: timePlans.map((timePlan) => ({
+      ...timePlan,
+      cycle_start: timePlan.cycle_start.toISOString().slice(0, 10),
+      cycle_end: timePlan.cycle_end.toISOString().slice(0, 10),
+    })),
   };
 
   res.json(result);
 });
 
-function handleProjects(lists: Map<number, List>, timeEntries: TimeEntry[]) {
+function handleProjects(
+  team: Team,
+  lists: Map<number, List>,
+  timeEntries: TimeEntry[]
+) {
   for (const timeEntry of timeEntries) {
     let list = lists.get(timeEntry.task_location.list_id);
     if (!list) {
@@ -156,6 +172,7 @@ function handleProjects(lists: Map<number, List>, timeEntries: TimeEntry[]) {
         id: timeEntry.task_location.list_id,
         space: timeEntry.task_location.space_name,
         name: timeEntry.task_location.list_name,
+        team_id: team.id,
         entries: {},
       };
 
@@ -166,13 +183,18 @@ function handleProjects(lists: Map<number, List>, timeEntries: TimeEntry[]) {
   }
 }
 
-function handleUsers(users: Map<number, User>, timeEntries: TimeEntry[]) {
+function handleUsers(
+  team: Team,
+  users: Map<number, User>,
+  timeEntries: TimeEntry[]
+) {
   for (const timeEntry of timeEntries) {
     let user = users.get(timeEntry.user.id);
     if (!user) {
       user = {
         id: timeEntry.user.id,
         name: timeEntry.user.username,
+        team_id: team.id,
         entries: {},
       };
 
@@ -187,13 +209,18 @@ function handleUsers(users: Map<number, User>, timeEntries: TimeEntry[]) {
   }
 }
 
-function handleTags(tags: Map<string, Tag>, timeEntries: TimeEntry[]) {
+function handleTags(
+  team: Team,
+  tags: Map<string, Tag>,
+  timeEntries: TimeEntry[]
+) {
   for (const timeEntry of timeEntries) {
     for (const tagEntry of [...timeEntry.tags, ...timeEntry.task_tags]) {
       let tag = tags.get(tagEntry.name);
       if (!tag) {
         tag = {
           name: tagEntry.name,
+          team_id: team.id,
           entries: {},
         };
 
